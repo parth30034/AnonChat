@@ -3,13 +3,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { AppState, User, Message } from './types';
 import { generateRandomUsername, getRandomColor } from './utils/nameGenerator';
 import JoinScreen from './components/JoinScreen';
 import ChatScreen from './components/ChatScreen';
 import SearchingScreen from './components/SearchingScreen';
 import { motion, AnimatePresence } from 'motion/react';
+import { connectSocket, disconnectSocket } from './lib/socket';
+import type { Socket } from 'socket.io-client';
+
+interface MessageDto {
+  id: string;
+  sender: string;
+  senderColor: string;
+  content: string;
+  timestamp: string;
+  isSystem: boolean;
+}
 
 export default function App() {
   const [view, setView] = useState<AppState>('join');
@@ -17,83 +28,177 @@ export default function App() {
     username: generateRandomUsername(),
     color: getRandomColor(),
   });
+  const [roomId, setRoomId] = useState('');
   const [roomName, setRoomName] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [isTyping, setIsTyping] = useState(false);
   const [onlineCount, setOnlineCount] = useState(1);
   const [isOneToOne, setIsOneToOne] = useState(false);
+  const [partnerLeft, setPartnerLeft] = useState(false);
 
-  const handleJoin = (name: string) => {
-    if (name === 'Public Pool') {
-      setView('searching');
-      setIsOneToOne(true);
-      
-      // Simulate finding a partner
-      setTimeout(() => {
-        setRoomName('Stranger');
-        setView('chat');
-        const systemMsg: Message = {
-          id: Date.now().toString(),
-          sender: 'System',
-          content: 'You are now chatting with a random stranger. Say hi!',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          isSystem: true,
-        };
-        setMessages([systemMsg]);
-        setOnlineCount(2);
-      }, 3000);
-    } else {
-      setRoomName(name);
-      setIsOneToOne(false);
-      setView('chat');
-      
-      // Mock system message
-      const systemMsg: Message = {
+  const socketRef = useRef<Socket | null>(null);
+  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function dtoToMessage(dto: MessageDto, myUsername: string): Message {
+    return {
+      id: dto.id,
+      sender: dto.sender,
+      content: dto.content,
+      timestamp: dto.timestamp,
+      isSystem: dto.isSystem,
+      isOwn: !dto.isSystem && dto.sender === myUsername,
+      color: dto.senderColor || undefined,
+    };
+  }
+
+  // Attach socket listeners when entering chat view
+  useEffect(() => {
+    if (view !== 'chat' || !socketRef.current) return;
+
+    const socket = socketRef.current;
+    const username = user.username;
+
+    const onReceiveMessage = (dto: MessageDto) => {
+      setMessages((prev) => [...prev, dtoToMessage(dto, username)]);
+    };
+
+    const onUserTyping = (payload: { username: string; isTyping: boolean }) => {
+      if (payload.username !== username) {
+        setIsTyping(payload.isTyping);
+      }
+    };
+
+    const onUserJoined = (payload: { username: string; count: number }) => {
+      setOnlineCount(payload.count);
+    };
+
+    const onUserLeft = (payload: { username: string; count: number }) => {
+      setOnlineCount(payload.count);
+    };
+
+    const onPartnerLeft = () => {
+      setPartnerLeft(true);
+      const sysMsg: Message = {
         id: Date.now().toString(),
         sender: 'System',
-        content: `You joined room: ${name}`,
+        content: 'Your chat partner has left.',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         isSystem: true,
       };
-      setMessages([systemMsg]);
-      setOnlineCount(Math.floor(Math.random() * 10) + 2);
+      setMessages((prev) => [...prev, sysMsg]);
+    };
+
+    socket.on('receive_message', onReceiveMessage);
+    socket.on('user_typing', onUserTyping);
+    socket.on('user_joined', onUserJoined);
+    socket.on('user_left', onUserLeft);
+    socket.on('partner_left', onPartnerLeft);
+
+    return () => {
+      socket.off('receive_message', onReceiveMessage);
+      socket.off('user_typing', onUserTyping);
+      socket.off('user_joined', onUserJoined);
+      socket.off('user_left', onUserLeft);
+      socket.off('partner_left', onPartnerLeft);
+    };
+  }, [view, user.username]);
+
+  const handleJoin = (name: string) => {
+    const socket = connectSocket();
+    socketRef.current = socket;
+
+    if (name === 'Public Pool') {
+      setIsOneToOne(true);
+      setView('searching');
+      setPartnerLeft(false);
+
+      socket.once('pool_matched', (payload: { roomId: string; partnerUsername: string; partnerColor: string }) => {
+        setRoomId(payload.roomId);
+        setRoomName('Stranger');
+        setMessages([]);
+        setOnlineCount(2);
+        setView('chat');
+      });
+
+      socket.emit('join_pool', { username: user.username, color: user.color });
+    } else {
+      setIsOneToOne(false);
+      setPartnerLeft(false);
+
+      socket.once('room_joined', (payload: {
+        roomId: string;
+        messages: MessageDto[];
+        onlineCount: number;
+        roomType: string;
+      }) => {
+        setRoomId(payload.roomId);
+        setRoomName(name);
+        setMessages(payload.messages.map((dto) => dtoToMessage(dto, user.username)));
+        setOnlineCount(payload.onlineCount);
+        setView('chat');
+      });
+
+      socket.emit('join_room', { roomId: name, username: user.username, color: user.color });
     }
   };
 
-  const handleLeave = () => {
+  const handleLeave = useCallback(() => {
+    if (socketRef.current && roomId) {
+      socketRef.current.emit('leave_room', { roomId });
+    }
+    disconnectSocket();
+    socketRef.current = null;
     setView('join');
     setMessages([]);
+    setRoomId('');
     setRoomName('');
+    setIsOneToOne(false);
+    setPartnerLeft(false);
+    setIsTyping(false);
+  }, [roomId]);
+
+  const handleCancelSearch = () => {
+    if (socketRef.current) {
+      socketRef.current.emit('cancel_pool');
+      socketRef.current.off('pool_matched');
+    }
+    disconnectSocket();
+    socketRef.current = null;
+    setView('join');
     setIsOneToOne(false);
   };
 
   const handleSendMessage = (content: string) => {
-    const newMessage: Message = {
-      id: Date.now().toString(),
-      sender: user.username,
+    if (!socketRef.current || !roomId) return;
+    socketRef.current.emit('send_message', {
+      roomId,
       content,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      isOwn: true,
+      username: user.username,
       color: user.color,
-    };
-    setMessages(prev => [...prev, newMessage]);
-
-    // Mock response for demo
-    setTimeout(() => {
-      setIsTyping(true);
-      setTimeout(() => {
-        setIsTyping(false);
-        const response: Message = {
-          id: (Date.now() + 1).toString(),
-          sender: isOneToOne ? 'Stranger' : 'RandomStranger',
-          content: isOneToOne ? 'Hello! Nice to meet you anonymously.' : 'Hey there! This is a mock response.',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          color: getRandomColor(),
-        };
-        setMessages(prev => [...prev, response]);
-      }, 2000);
-    }, 1000);
+    });
   };
+
+  const handleTyping = useCallback((typing: boolean) => {
+    if (!socketRef.current || !roomId) return;
+
+    socketRef.current.emit('user_typing', {
+      roomId,
+      username: user.username,
+      isTyping: typing,
+    });
+
+    if (typing) {
+      // Reset the stop-typing timer
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = setTimeout(() => {
+        socketRef.current?.emit('user_typing', {
+          roomId,
+          username: user.username,
+          isTyping: false,
+        });
+      }, 2000);
+    }
+  }, [roomId, user.username]);
 
   const randomizeUser = () => {
     setUser({
@@ -113,10 +218,10 @@ export default function App() {
             exit={{ opacity: 0, y: -20 }}
             className="w-full max-w-md"
           >
-            <JoinScreen 
-              user={user} 
-              onJoin={handleJoin} 
-              onRandomize={randomizeUser} 
+            <JoinScreen
+              user={user}
+              onJoin={handleJoin}
+              onRandomize={randomizeUser}
             />
           </motion.div>
         )}
@@ -129,7 +234,7 @@ export default function App() {
             exit={{ opacity: 0, scale: 1.1 }}
             className="w-full max-w-md"
           >
-            <SearchingScreen onCancel={handleLeave} />
+            <SearchingScreen onCancel={handleCancelSearch} />
           </motion.div>
         )}
 
@@ -141,7 +246,7 @@ export default function App() {
             exit={{ opacity: 0, scale: 1.05 }}
             className="w-full h-full md:h-[800px] max-w-5xl"
           >
-            <ChatScreen 
+            <ChatScreen
               user={user}
               roomName={roomName}
               messages={messages}
@@ -149,6 +254,9 @@ export default function App() {
               onlineCount={onlineCount}
               onLeave={handleLeave}
               onSendMessage={handleSendMessage}
+              onTyping={handleTyping}
+              partnerLeft={partnerLeft}
+              isOneToOne={isOneToOne}
             />
           </motion.div>
         )}

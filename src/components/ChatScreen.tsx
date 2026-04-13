@@ -1,7 +1,7 @@
+import React, { useState, useEffect, useRef } from 'react';
 import { User, Message } from '../types';
-import { LogOut, Copy, Users, Send, Smile, AlertCircle } from 'lucide-react';
+import { LogOut, Copy, Send, Smile, AlertCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { useState, useEffect, useRef } from 'react';
 
 interface ChatScreenProps {
   user: User;
@@ -9,8 +9,11 @@ interface ChatScreenProps {
   messages: Message[];
   isTyping: boolean;
   onlineCount: number;
+  isOneToOne: boolean;
+  partnerLeft: boolean;
   onLeave: () => void;
   onSendMessage: (content: string) => void;
+  onTyping: (isTyping: boolean) => void;
 }
 
 export default function ChatScreen({
@@ -19,33 +22,47 @@ export default function ChatScreen({
   messages,
   isTyping,
   onlineCount,
+  isOneToOne,
+  partnerLeft,
   onLeave,
-  onSendMessage
+  onSendMessage,
+  onTyping,
 }: ChatScreenProps) {
   const [input, setInput] = useState('');
   const [showToast, setShowToast] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const typingStopTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, isTyping]);
 
   const handleSend = () => {
     if (input.trim() && input.length <= 500) {
       onSendMessage(input.trim());
       setInput('');
+      // Stop typing indicator immediately on send
+      if (typingStopTimer.current) clearTimeout(typingStopTimer.current);
+      onTyping(false);
     } else if (input.length > 500) {
       setShowToast(true);
       setTimeout(() => setShowToast(false), 3000);
     }
   };
 
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>): void => {
+    setInput(e.target.value);
+    onTyping(true);
+    if (typingStopTimer.current) clearTimeout(typingStopTimer.current);
+    typingStopTimer.current = setTimeout(() => onTyping(false), 2000);
+  };
+
   const copyRoomId = () => {
     navigator.clipboard.writeText(roomName);
-    // Could add a "Copied!" tooltip here
   };
+
+  const isPool = isOneToOne || roomName === 'Stranger';
 
   return (
     <div className="flex flex-col h-full bg-secondary md:rounded-2xl shadow-2xl border border-accent/30 overflow-hidden relative">
@@ -61,25 +78,28 @@ export default function ChatScreen({
           </button>
           <div>
             <h2 className="text-lg font-bold text-text-main flex items-center gap-2">
-              {roomName === 'Stranger' ? 'Chatting with Stranger' : roomName}
-              {roomName === 'Stranger' ? (
+              {isPool ? 'Chatting with Stranger' : roomName}
+              {isPool ? (
                 <span className="text-[10px] bg-highlight/20 text-highlight px-2 py-0.5 rounded-full border border-highlight/30 uppercase tracking-widest">1-on-1</span>
               ) : (
-                <button 
+                <button
                   onClick={copyRoomId}
                   className="p-1 hover:bg-accent/50 rounded transition-colors text-text-dim"
+                  title="Copy room ID"
                 >
                   <Copy className="w-3 h-3" />
                 </button>
               )}
             </h2>
             <div className="flex items-center gap-1.5 text-xs text-text-dim">
-              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-              {roomName === 'Stranger' ? 'Private Session' : `${onlineCount} online`}
+              <span className={`w-2 h-2 rounded-full ${partnerLeft ? 'bg-red-500' : 'bg-green-500 animate-pulse'}`}></span>
+              {isPool
+                ? partnerLeft ? 'Partner disconnected' : 'Private Session'
+                : `${onlineCount} online`}
             </div>
           </div>
         </div>
-        
+
         <div className="flex items-center gap-2">
           <div className="hidden sm:flex flex-col items-end">
             <span className="text-xs font-semibold text-text-dim uppercase tracking-widest">Identity</span>
@@ -89,7 +109,7 @@ export default function ChatScreen({
       </header>
 
       {/* Messages Area */}
-      <div 
+      <div
         ref={scrollRef}
         className="flex-grow overflow-y-auto p-4 space-y-4 custom-scrollbar"
       >
@@ -106,10 +126,10 @@ export default function ChatScreen({
                   {msg.content}
                 </span>
               ) : (
-                <div className={`max-w-[85%] md:max-w-[70%]`}>
+                <div className="max-w-[85%] md:max-w-[70%]">
                   <div className="flex items-center gap-2 mb-1 px-1">
-                    <span 
-                      className="text-xs font-bold font-mono" 
+                    <span
+                      className="text-xs font-bold font-mono"
                       style={{ color: msg.color }}
                     >
                       {msg.sender} {msg.isOwn && <span className="text-text-dim font-normal">(You)</span>}
@@ -118,8 +138,8 @@ export default function ChatScreen({
                   </div>
                   <div className={`
                     px-4 py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm
-                    ${msg.isOwn 
-                      ? 'bg-highlight text-white rounded-tr-none' 
+                    ${msg.isOwn
+                      ? 'bg-highlight text-white rounded-tr-none'
                       : 'bg-accent/50 text-text-main rounded-tl-none border border-accent/30'}
                   `}>
                     {msg.content}
@@ -148,6 +168,7 @@ export default function ChatScreen({
             </motion.div>
           )}
         </AnimatePresence>
+        <div ref={bottomRef} />
       </div>
 
       {/* Input Area */}
@@ -157,16 +178,17 @@ export default function ChatScreen({
             <div className="flex-grow relative">
               <textarea
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={handleInputChange}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     handleSend();
                   }
                 }}
-                placeholder="Type your message..."
+                placeholder={partnerLeft ? 'Your partner has left this chat.' : 'Type your message...'}
+                disabled={partnerLeft}
                 rows={1}
-                className="w-full bg-primary border border-accent/30 rounded-2xl pl-4 pr-12 py-3 focus:outline-none focus:border-highlight/50 transition-colors text-text-main resize-none max-h-32 custom-scrollbar"
+                className="w-full bg-primary border border-accent/30 rounded-2xl pl-4 pr-12 py-3 focus:outline-none focus:border-highlight/50 transition-colors text-text-main resize-none max-h-32 custom-scrollbar disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{ height: 'auto' }}
               />
               <button className="absolute right-3 bottom-3 p-1.5 text-text-dim hover:text-highlight transition-colors">
@@ -175,13 +197,13 @@ export default function ChatScreen({
             </div>
             <button
               onClick={handleSend}
-              disabled={!input.trim()}
+              disabled={!input.trim() || partnerLeft}
               className="bg-highlight hover:bg-highlight/90 disabled:opacity-50 disabled:cursor-not-allowed text-white p-3.5 rounded-2xl transition-all shadow-lg shadow-highlight/20 flex-shrink-0"
             >
               <Send className="w-5 h-5" />
             </button>
           </div>
-          
+
           <div className={`mt-2 flex justify-between items-center px-1 text-[10px] uppercase tracking-widest font-bold ${input.length > 500 ? 'text-highlight' : 'text-text-dim'}`}>
             <span>{input.length > 500 ? 'Message too long' : ''}</span>
             <span>{input.length}/500</span>
@@ -203,29 +225,6 @@ export default function ChatScreen({
           </motion.div>
         )}
       </AnimatePresence>
-
-      {/* Socket.io connection placeholders */}
-      {/* 
-        useEffect(() => {
-          const socket = io(SERVER_URL);
-          
-          socket.on('connect', () => setStatus('connected'));
-          
-          socket.on('receive_message', (message) => {
-            setMessages(prev => [...prev, message]);
-          });
-          
-          socket.on('user_typing', ({ username, isTyping }) => {
-            if (username !== user.username) setIsTyping(isTyping);
-          });
-
-          return () => socket.disconnect();
-        }, []);
-
-        const sendMessage = (content) => {
-          socket.emit('send_message', { roomId, content, username: user.username });
-        };
-      */}
     </div>
   );
 }
