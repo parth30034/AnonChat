@@ -6,6 +6,9 @@ export interface Message {
   isSystem?: boolean;
   isOwn?: boolean;
   color?: string;
+  isFlagged?: boolean;
+  clusterId?: string;
+  clusterLabel?: string;
 }
 
 export interface User {

@@ -37,6 +37,19 @@ export interface MessageDto {
   content: string;
   timestamp: string;   // "HH:MM"
   isSystem: boolean;
+  isFlagged?: boolean;
+  clusterId?: string;
+  clusterLabel?: string;
+}
+
+export interface MessageBlockedPayload {
+  reason?: string;
+}
+
+export interface ClusterUpdatePayload {
+  messageId: string;
+  clusterId: string;
+  clusterLabel: string;
 }
 
 export interface RoomJoinedPayload {

@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { User, Message } from '../types';
-import { LogOut, Copy, Send, Smile, AlertCircle } from 'lucide-react';
+import { LogOut, Copy, Send, Smile, AlertCircle, ShieldAlert, Tags } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface ChatScreenProps {
@@ -11,9 +11,21 @@ interface ChatScreenProps {
   onlineCount: number;
   isOneToOne: boolean;
   partnerLeft: boolean;
+  blockedToast?: string | null;
   onLeave: () => void;
   onSendMessage: (content: string) => void;
   onTyping: (isTyping: boolean) => void;
+}
+
+const TOPIC_PALETTE = [
+  '#4ecca3', '#45b7d1', '#ff9f43', '#a29bfe',
+  '#fd79a8', '#e94560', '#00cec9', '#fab1a0',
+];
+
+function topicColor(clusterId: string): string {
+  let h = 0;
+  for (const c of clusterId) h = (Math.imul(31, h) + c.charCodeAt(0)) | 0;
+  return TOPIC_PALETTE[Math.abs(h) % TOPIC_PALETTE.length];
 }
 
 export default function ChatScreen({
@@ -24,12 +36,14 @@ export default function ChatScreen({
   onlineCount,
   isOneToOne,
   partnerLeft,
+  blockedToast,
   onLeave,
   onSendMessage,
   onTyping,
 }: ChatScreenProps) {
   const [input, setInput] = useState('');
   const [showToast, setShowToast] = useState(false);
+  const [showTopics, setShowTopics] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const typingStopTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -38,11 +52,24 @@ export default function ChatScreen({
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, isTyping]);
 
+  // Derive unique active topics from messages
+  const activeTopics = useMemo(() => {
+    const seen = new Map<string, { id: string; label: string; count: number }>();
+    for (const msg of messages) {
+      if (!msg.clusterId || !msg.clusterLabel || msg.isSystem) continue;
+      if (seen.has(msg.clusterId)) {
+        seen.get(msg.clusterId)!.count++;
+      } else {
+        seen.set(msg.clusterId, { id: msg.clusterId, label: msg.clusterLabel, count: 1 });
+      }
+    }
+    return [...seen.values()].sort((a, b) => b.count - a.count);
+  }, [messages]);
+
   const handleSend = () => {
     if (input.trim() && input.length <= 500) {
       onSendMessage(input.trim());
       setInput('');
-      // Stop typing indicator immediately on send
       if (typingStopTimer.current) clearTimeout(typingStopTimer.current);
       onTyping(false);
     } else if (input.length > 500) {
@@ -101,12 +128,50 @@ export default function ChatScreen({
         </div>
 
         <div className="flex items-center gap-2">
+          {activeTopics.length > 0 && (
+            <button
+              onClick={() => setShowTopics((v) => !v)}
+              className={`p-2 rounded-lg transition-colors text-text-dim hover:text-highlight ${showTopics ? 'bg-highlight/10 text-highlight' : ''}`}
+              title="Toggle topic view"
+            >
+              <Tags className="w-4 h-4" />
+            </button>
+          )}
           <div className="hidden sm:flex flex-col items-end">
             <span className="text-xs font-semibold text-text-dim uppercase tracking-widest">Identity</span>
             <span className="text-sm font-mono font-medium" style={{ color: user.color }}>{user.username}</span>
           </div>
         </div>
       </header>
+
+      {/* Active Topics Bar */}
+      <AnimatePresence>
+        {showTopics && activeTopics.length > 0 && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden border-b border-accent/20 bg-primary/40"
+          >
+            <div className="px-4 py-2 flex flex-wrap gap-2 items-center">
+              <span className="text-[10px] uppercase tracking-widest text-text-dim font-bold mr-1">Topics</span>
+              {activeTopics.map((t) => (
+                <span
+                  key={t.id}
+                  className="text-xs px-2 py-0.5 rounded-full font-medium border"
+                  style={{
+                    color: topicColor(t.id),
+                    borderColor: `${topicColor(t.id)}40`,
+                    backgroundColor: `${topicColor(t.id)}15`,
+                  }}
+                >
+                  {t.label} <span className="opacity-60">·{t.count}</span>
+                </span>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Messages Area */}
       <div
@@ -135,15 +200,38 @@ export default function ChatScreen({
                       {msg.sender} {msg.isOwn && <span className="text-text-dim font-normal">(You)</span>}
                     </span>
                     <span className="text-[10px] text-text-dim">{msg.timestamp}</span>
+                    {msg.isFlagged && (
+                      <span title="Flagged by safety filter" className="text-yellow-400">
+                        <ShieldAlert className="w-3 h-3" />
+                      </span>
+                    )}
                   </div>
                   <div className={`
                     px-4 py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm
-                    ${msg.isOwn
-                      ? 'bg-highlight text-white rounded-tr-none'
-                      : 'bg-accent/50 text-text-main rounded-tl-none border border-accent/30'}
+                    ${msg.isFlagged
+                      ? msg.isOwn
+                        ? 'bg-yellow-500/80 text-white rounded-tr-none'
+                        : 'bg-yellow-900/30 text-text-main rounded-tl-none border border-yellow-600/30'
+                      : msg.isOwn
+                        ? 'bg-highlight text-white rounded-tr-none'
+                        : 'bg-accent/50 text-text-main rounded-tl-none border border-accent/30'}
                   `}>
                     {msg.content}
                   </div>
+                  {msg.clusterLabel && msg.clusterId && (
+                    <div className={`mt-1 px-1 ${msg.isOwn ? 'text-right' : 'text-left'}`}>
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full font-medium border"
+                        style={{
+                          color: topicColor(msg.clusterId),
+                          borderColor: `${topicColor(msg.clusterId)}40`,
+                          backgroundColor: `${topicColor(msg.clusterId)}15`,
+                        }}
+                      >
+                        {msg.clusterLabel}
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
             </motion.div>
@@ -211,7 +299,7 @@ export default function ChatScreen({
         </div>
       </footer>
 
-      {/* Error Toast */}
+      {/* Length error toast */}
       <AnimatePresence>
         {showToast && (
           <motion.div
@@ -222,6 +310,21 @@ export default function ChatScreen({
           >
             <AlertCircle className="w-4 h-4" />
             <span className="text-sm font-medium">Message exceeds 500 characters</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Moderation blocked toast */}
+      <AnimatePresence>
+        {blockedToast && (
+          <motion.div
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+            className="absolute bottom-24 left-1/2 -translate-x-1/2 bg-red-600 text-white px-4 py-2 rounded-lg shadow-xl flex items-center gap-2 z-50 max-w-xs text-center"
+          >
+            <ShieldAlert className="w-4 h-4 flex-shrink-0" />
+            <span className="text-sm font-medium">{blockedToast}</span>
           </motion.div>
         )}
       </AnimatePresence>

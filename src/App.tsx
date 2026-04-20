@@ -20,6 +20,9 @@ interface MessageDto {
   content: string;
   timestamp: string;
   isSystem: boolean;
+  isFlagged?: boolean;
+  clusterId?: string;
+  clusterLabel?: string;
 }
 
 export default function App() {
@@ -35,6 +38,7 @@ export default function App() {
   const [onlineCount, setOnlineCount] = useState(1);
   const [isOneToOne, setIsOneToOne] = useState(false);
   const [partnerLeft, setPartnerLeft] = useState(false);
+  const [blockedToast, setBlockedToast] = useState<string | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -48,6 +52,9 @@ export default function App() {
       isSystem: dto.isSystem,
       isOwn: !dto.isSystem && dto.sender === myUsername,
       color: dto.senderColor || undefined,
+      isFlagged: dto.isFlagged,
+      clusterId: dto.clusterId,
+      clusterLabel: dto.clusterLabel,
     };
   }
 
@@ -88,11 +95,31 @@ export default function App() {
       setMessages((prev) => [...prev, sysMsg]);
     };
 
+    const onMessageBlocked = (payload: { reason?: string }) => {
+      const label = payload.reason
+        ? `Message blocked: ${payload.reason}`
+        : 'Message blocked by safety filter.';
+      setBlockedToast(label);
+      setTimeout(() => setBlockedToast(null), 4000);
+    };
+
+    const onClusterUpdate = (payload: { messageId: string; clusterId: string; clusterLabel: string }) => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === payload.messageId
+            ? { ...m, clusterId: payload.clusterId, clusterLabel: payload.clusterLabel }
+            : m,
+        ),
+      );
+    };
+
     socket.on('receive_message', onReceiveMessage);
     socket.on('user_typing', onUserTyping);
     socket.on('user_joined', onUserJoined);
     socket.on('user_left', onUserLeft);
     socket.on('partner_left', onPartnerLeft);
+    socket.on('message_blocked', onMessageBlocked);
+    socket.on('cluster_update', onClusterUpdate);
 
     return () => {
       socket.off('receive_message', onReceiveMessage);
@@ -100,6 +127,8 @@ export default function App() {
       socket.off('user_joined', onUserJoined);
       socket.off('user_left', onUserLeft);
       socket.off('partner_left', onPartnerLeft);
+      socket.off('message_blocked', onMessageBlocked);
+      socket.off('cluster_update', onClusterUpdate);
     };
   }, [view, user.username]);
 
@@ -257,6 +286,7 @@ export default function App() {
               onTyping={handleTyping}
               partnerLeft={partnerLeft}
               isOneToOne={isOneToOne}
+              blockedToast={blockedToast}
             />
           </motion.div>
         )}
