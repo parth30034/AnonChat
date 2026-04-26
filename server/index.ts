@@ -3,7 +3,6 @@ import http from 'http';
 import cors from 'cors';
 import { Server } from 'socket.io';
 import { config } from './config.js';
-import { connectDB } from './db.js';
 import { registerSocketHandlers } from './socket/index.js';
 
 const app = express();
@@ -24,15 +23,8 @@ const io = new Server(httpServer, {
   },
 });
 
-connectDB()
-  .then(() => {
-    registerSocketHandlers(io);
+registerSocketHandlers(io);
 
-    httpServer.listen(config.port, () => {
-      console.log(`Server running on port ${config.port}`);
-    });
-  })
-  .catch((err) => {
-    console.error('Failed to connect to MongoDB:', err);
-    process.exit(1);
-  });
+httpServer.listen(config.port, () => {
+  console.log(`Server running on port ${config.port}`);
+});

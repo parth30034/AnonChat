@@ -1,25 +1,29 @@
 import { Server, Socket } from 'socket.io';
-import { registerRoomHandlers } from './handlers/roomHandlers.js';
 import { registerPoolHandlers } from './handlers/poolHandlers.js';
-import { leaveAllRooms } from '../services/roomService.js';
+import { registerSessionHandlers } from './handlers/sessionHandlers.js';
 import { matchQueue } from '../services/poolService.js';
 
 export function registerSocketHandlers(io: Server): void {
-  // Give the MatchQueue access to the io instance
   matchQueue.init(io);
 
   io.on('connection', (socket: Socket) => {
     console.log(`Socket connected: ${socket.id}`);
 
-    registerRoomHandlers(io, socket);
     registerPoolHandlers(io, socket);
+    registerSessionHandlers(io, socket);
 
-    socket.on('disconnect', async () => {
-      console.log(`Socket disconnected: ${socket.id}`);
-      // Remove from pool queue if waiting
+    // 'disconnecting' fires before the socket leaves its rooms —
+    // socket.rooms is still populated here, so we can notify partners.
+    socket.on('disconnecting', () => {
       matchQueue.dequeue(socket.id);
-      // Leave all active rooms gracefully
-      await leaveAllRooms(io, socket);
+      for (const roomId of socket.rooms) {
+        if (roomId === socket.id) continue; // skip the default self-room
+        socket.to(roomId).emit('partner_left', { reason: 'disconnect' });
+      }
+    });
+
+    socket.on('disconnect', () => {
+      console.log(`Socket disconnected: ${socket.id}`);
     });
   });
 }

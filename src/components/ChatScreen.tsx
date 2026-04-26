@@ -1,16 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User, Message } from '../types';
-import { LogOut, Copy, Send, Smile, AlertCircle } from 'lucide-react';
+import { LogOut, Send, Smile, AlertCircle, Lock } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface ChatScreenProps {
   user: User;
-  roomName: string;
   messages: Message[];
   isTyping: boolean;
-  onlineCount: number;
-  isOneToOne: boolean;
-  partnerLeft: boolean;
   onLeave: () => void;
   onSendMessage: (content: string) => void;
   onTyping: (isTyping: boolean) => void;
@@ -18,12 +14,8 @@ interface ChatScreenProps {
 
 export default function ChatScreen({
   user,
-  roomName,
   messages,
   isTyping,
-  onlineCount,
-  isOneToOne,
-  partnerLeft,
   onLeave,
   onSendMessage,
   onTyping,
@@ -42,7 +34,6 @@ export default function ChatScreen({
     if (input.trim() && input.length <= 500) {
       onSendMessage(input.trim());
       setInput('');
-      // Stop typing indicator immediately on send
       if (typingStopTimer.current) clearTimeout(typingStopTimer.current);
       onTyping(false);
     } else if (input.length > 500) {
@@ -58,12 +49,6 @@ export default function ChatScreen({
     typingStopTimer.current = setTimeout(() => onTyping(false), 2000);
   };
 
-  const copyRoomId = () => {
-    navigator.clipboard.writeText(roomName);
-  };
-
-  const isPool = isOneToOne || roomName === 'Stranger';
-
   return (
     <div className="flex flex-col h-full bg-secondary md:rounded-2xl shadow-2xl border border-accent/30 overflow-hidden relative">
       {/* Header */}
@@ -72,39 +57,25 @@ export default function ChatScreen({
           <button
             onClick={onLeave}
             className="p-2 hover:bg-highlight/10 rounded-lg text-text-dim hover:text-highlight transition-colors"
-            title="Leave Room"
+            title="Leave Session"
           >
             <LogOut className="w-5 h-5" />
           </button>
           <div>
             <h2 className="text-lg font-bold text-text-main flex items-center gap-2">
-              {isPool ? 'Chatting with Stranger' : roomName}
-              {isPool ? (
-                <span className="text-[10px] bg-highlight/20 text-highlight px-2 py-0.5 rounded-full border border-highlight/30 uppercase tracking-widest">1-on-1</span>
-              ) : (
-                <button
-                  onClick={copyRoomId}
-                  className="p-1 hover:bg-accent/50 rounded transition-colors text-text-dim"
-                  title="Copy room ID"
-                >
-                  <Copy className="w-3 h-3" />
-                </button>
-              )}
+              <Lock className="w-4 h-4 text-highlight" />
+              End-to-end encrypted
             </h2>
             <div className="flex items-center gap-1.5 text-xs text-text-dim">
-              <span className={`w-2 h-2 rounded-full ${partnerLeft ? 'bg-red-500' : 'bg-green-500 animate-pulse'}`}></span>
-              {isPool
-                ? partnerLeft ? 'Partner disconnected' : 'Private Session'
-                : `${onlineCount} online`}
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+              Private Session
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="hidden sm:flex flex-col items-end">
-            <span className="text-xs font-semibold text-text-dim uppercase tracking-widest">Identity</span>
-            <span className="text-sm font-mono font-medium" style={{ color: user.color }}>{user.username}</span>
-          </div>
+        <div className="hidden sm:flex flex-col items-end">
+          <span className="text-xs font-semibold text-text-dim uppercase tracking-widest">Identity</span>
+          <span className="text-sm font-mono font-medium" style={{ color: user.color }}>{user.username}</span>
         </div>
       </header>
 
@@ -185,10 +156,9 @@ export default function ChatScreen({
                     handleSend();
                   }
                 }}
-                placeholder={partnerLeft ? 'Your partner has left this chat.' : 'Type your message...'}
-                disabled={partnerLeft}
+                placeholder="Type your message..."
                 rows={1}
-                className="w-full bg-primary border border-accent/30 rounded-2xl pl-4 pr-12 py-3 focus:outline-none focus:border-highlight/50 transition-colors text-text-main resize-none max-h-32 custom-scrollbar disabled:opacity-40 disabled:cursor-not-allowed"
+                className="w-full bg-primary border border-accent/30 rounded-2xl pl-4 pr-12 py-3 focus:outline-none focus:border-highlight/50 transition-colors text-text-main resize-none max-h-32 custom-scrollbar"
                 style={{ height: 'auto' }}
               />
               <button className="absolute right-3 bottom-3 p-1.5 text-text-dim hover:text-highlight transition-colors">
@@ -197,7 +167,7 @@ export default function ChatScreen({
             </div>
             <button
               onClick={handleSend}
-              disabled={!input.trim() || partnerLeft}
+              disabled={!input.trim()}
               className="bg-highlight hover:bg-highlight/90 disabled:opacity-50 disabled:cursor-not-allowed text-white p-3.5 rounded-2xl transition-all shadow-lg shadow-highlight/20 flex-shrink-0"
             >
               <Send className="w-5 h-5" />

@@ -11,4 +11,11 @@ export function registerPoolHandlers(io: Server, socket: Socket): void {
   socket.on('cancel_pool', () => {
     matchQueue.dequeue(socket.id);
   });
+
+  socket.on('leave_session', (payload: { roomId: string }) => {
+    const { roomId } = payload;
+    // Notify partner before leaving
+    socket.to(roomId).emit('partner_left', { reason: 'left' });
+    socket.leave(roomId);
+  });
 }

@@ -1,6 +1,5 @@
 import { randomUUID } from 'crypto';
 import { Server, Socket } from 'socket.io';
-import { createPoolRoom } from './roomService.js';
 
 interface QueueEntry {
   socketId: string;
@@ -31,7 +30,7 @@ class MatchQueue {
     this.queue.delete(socketId);
   }
 
-  private async tryMatch(): Promise<void> {
+  private tryMatch(): void {
     if (!this.io) return;
 
     const entries = [...this.queue.values()].sort((a, b) => a.joinedAt - b.joinedAt);
@@ -42,7 +41,11 @@ class MatchQueue {
     this.queue.delete(entry2.socketId);
 
     const roomId = randomUUID();
-    await createPoolRoom(this.io, roomId, entry1, entry2);
+
+    const s1 = this.io.sockets.sockets.get(entry1.socketId);
+    const s2 = this.io.sockets.sockets.get(entry2.socketId);
+    if (s1) s1.join(roomId);
+    if (s2) s2.join(roomId);
 
     // Notify each user of the match
     this.io.to(entry1.socketId).emit('pool_matched', {

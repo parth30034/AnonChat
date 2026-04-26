@@ -4,263 +4,288 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { AppState, User, Message } from './types';
+import { AppState, User, Message, EncryptedPayload } from './types';
 import { generateRandomUsername, getRandomColor } from './utils/nameGenerator';
 import JoinScreen from './components/JoinScreen';
 import ChatScreen from './components/ChatScreen';
 import SearchingScreen from './components/SearchingScreen';
 import { motion, AnimatePresence } from 'motion/react';
 import { connectSocket, disconnectSocket } from './lib/socket';
+import {
+  generateKeyPair,
+  exportPublicKey,
+  importPublicKey,
+  deriveSharedKey,
+  encryptMessage,
+  decryptMessage,
+} from './lib/crypto';
 import type { Socket } from 'socket.io-client';
 
-interface MessageDto {
-  id: string;
-  sender: string;
-  senderColor: string;
-  content: string;
-  timestamp: string;
-  isSystem: boolean;
-}
-
 export default function App() {
-  const [view, setView] = useState<AppState>('join');
-  const [user, setUser] = useState<User>({
+  const [view, setView]               = useState<AppState>('join');
+  const [user]                        = useState<User>({
     username: generateRandomUsername(),
     color: getRandomColor(),
   });
-  const [roomId, setRoomId] = useState('');
-  const [roomName, setRoomName] = useState('');
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [isTyping, setIsTyping] = useState(false);
-  const [onlineCount, setOnlineCount] = useState(1);
-  const [isOneToOne, setIsOneToOne] = useState(false);
-  const [partnerLeft, setPartnerLeft] = useState(false);
+  const [roomId, setRoomId]           = useState('');
+  const [messages, setMessages]       = useState<Message[]>([]);
+  const [isTyping, setIsTyping]       = useState(false);
+  const [sessionEndReason, setSessionEndReason] = useState<string>('');
 
-  const socketRef = useRef<Socket | null>(null);
-  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const socketRef    = useRef<Socket | null>(null);
+  const keyPairRef   = useRef<CryptoKeyPair | null>(null);
+  const sharedKeyRef = useRef<CryptoKey | null>(null);
 
-  function dtoToMessage(dto: MessageDto, myUsername: string): Message {
+  // BUG 3 FIX: endSession lives in a ref so partner_left always calls
+  // the current implementation, never a stale closure capture.
+  const endSessionRef = useRef<(reason: string) => void>(() => {});
+
+  // Keep endSessionRef.current pointing at the latest closure (no deps →
+  // runs after every render, always fresh).
+  useEffect(() => {
+    endSessionRef.current = (reason: string) => {
+      sharedKeyRef.current = null;
+      keyPairRef.current   = null;
+      setSessionEndReason(reason);
+      setView('ended');
+    };
+  });
+
+  function systemMsg(content: string): Message {
     return {
-      id: dto.id,
-      sender: dto.sender,
-      content: dto.content,
-      timestamp: dto.timestamp,
-      isSystem: dto.isSystem,
-      isOwn: !dto.isSystem && dto.sender === myUsername,
-      color: dto.senderColor || undefined,
+      id: Date.now().toString(),
+      sender: 'System',
+      content,
+      timestamp: new Date().toLocaleTimeString([], {
+        hour: '2-digit', minute: '2-digit'
+      }),
+      isSystem: true,
     };
   }
 
-  // Attach socket listeners when entering chat view
-  useEffect(() => {
-    if (view !== 'chat' || !socketRef.current) return;
-
-    const socket = socketRef.current;
-    const username = user.username;
-
-    const onReceiveMessage = (dto: MessageDto) => {
-      setMessages((prev) => [...prev, dtoToMessage(dto, username)]);
-    };
-
-    const onUserTyping = (payload: { username: string; isTyping: boolean }) => {
-      if (payload.username !== username) {
-        setIsTyping(payload.isTyping);
-      }
-    };
-
-    const onUserJoined = (payload: { username: string; count: number }) => {
-      setOnlineCount(payload.count);
-    };
-
-    const onUserLeft = (payload: { username: string; count: number }) => {
-      setOnlineCount(payload.count);
-    };
-
-    const onPartnerLeft = () => {
-      setPartnerLeft(true);
-      const sysMsg: Message = {
-        id: Date.now().toString(),
-        sender: 'System',
-        content: 'Your chat partner has left.',
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        isSystem: true,
-      };
-      setMessages((prev) => [...prev, sysMsg]);
-    };
-
-    socket.on('receive_message', onReceiveMessage);
-    socket.on('user_typing', onUserTyping);
-    socket.on('user_joined', onUserJoined);
-    socket.on('user_left', onUserLeft);
-    socket.on('partner_left', onPartnerLeft);
-
-    return () => {
-      socket.off('receive_message', onReceiveMessage);
-      socket.off('user_typing', onUserTyping);
-      socket.off('user_joined', onUserJoined);
-      socket.off('user_left', onUserLeft);
-      socket.off('partner_left', onPartnerLeft);
-    };
-  }, [view, user.username]);
-
-  const handleJoin = (name: string) => {
+  // BUG 3 FIX: endSession removed from deps — handleJoinPool only depends on user.
+  const handleJoinPool = useCallback(async () => {
+    setView('searching');   // immediately hide the button — prevents double-invocation
     const socket = connectSocket();
     socketRef.current = socket;
 
-    if (name === 'Public Pool') {
-      setIsOneToOne(true);
-      setView('searching');
-      setPartnerLeft(false);
+    // Generate key pair immediately — ready before match happens
+    keyPairRef.current = await generateKeyPair();
 
-      socket.once('pool_matched', (payload: { roomId: string; partnerUsername: string; partnerColor: string }) => {
-        setRoomId(payload.roomId);
-        setRoomName('Stranger');
-        setMessages([]);
-        setOnlineCount(2);
-        setView('chat');
+    socket.once('pool_matched', async (payload: {
+      roomId: string;
+      partnerUsername: string;
+      partnerColor: string;
+    }) => {
+      const currentRoomId = payload.roomId;
+      setRoomId(currentRoomId);
+      setMessages([systemMsg('Matched! Establishing secure connection...')]);
+      setView('handshake');
+
+      // BUG 1 FIX: give React time to render the handshake screen before
+      // the key exchange completes and immediately flips to 'chat'.
+      await new Promise(resolve => setTimeout(resolve, 800));
+
+      // Send our public key to the server for relay to partner
+      const pubKey = await exportPublicKey(keyPairRef.current!.publicKey);
+      socket.emit('public_key_announce', {
+        roomId: currentRoomId,
+        publicKey: pubKey,
       });
 
-      socket.emit('join_pool', { username: user.username, color: user.color });
-    } else {
-      setIsOneToOne(false);
-      setPartnerLeft(false);
-
-      socket.once('room_joined', (payload: {
-        roomId: string;
-        messages: MessageDto[];
-        onlineCount: number;
-        roomType: string;
-      }) => {
-        setRoomId(payload.roomId);
-        setRoomName(name);
-        setMessages(payload.messages.map((dto) => dtoToMessage(dto, user.username)));
-        setOnlineCount(payload.onlineCount);
+      // Wait for partner's public key
+      socket.once('public_key_receive', async (data: { publicKey: JsonWebKey }) => {
+        const theirKey = await importPublicKey(data.publicKey);
+        sharedKeyRef.current = await deriveSharedKey(
+          keyPairRef.current!.privateKey,
+          theirKey
+        );
+        setMessages([systemMsg('🔒 Secure session established. Messages are end-to-end encrypted.')]);
         setView('chat');
+
+        // BUG 2 FIX: register encrypted_message listener here — exactly once
+        // per session, after sharedKeyRef is populated. No view dependency.
+        socket.on('encrypted_message', async (p: EncryptedPayload) => {
+          if (!sharedKeyRef.current) return;
+          try {
+            const plaintext = await decryptMessage(
+              sharedKeyRef.current,
+              p.iv,
+              p.ciphertext
+            );
+            setMessages((prev: Message[]) => [...prev, {
+              id: crypto.randomUUID(),
+              sender: p.sender,
+              content: plaintext,
+              timestamp: new Date().toLocaleTimeString([], {
+                hour: '2-digit', minute: '2-digit'
+              }),
+              isOwn: false,
+              color: p.color,
+            }]);
+          } catch {
+            console.error('Decryption failed — key mismatch or corrupted payload');
+          }
+        });
+
+        // BUG 3 FIX: register user_typing listener here — same session scope,
+        // no stale closure risk (user is stable for the session lifetime).
+        socket.on('user_typing', (p: { username: string; isTyping: boolean }) => {
+          if (p.username !== user.username) setIsTyping(p.isTyping);
+        });
       });
+    });
 
-      socket.emit('join_room', { roomId: name, username: user.username, color: user.color });
-    }
-  };
+    // BUG 3 FIX: call endSessionRef.current so we always invoke the latest
+    // implementation regardless of when this listener fires.
+    socket.on('partner_left', (data: { reason: string }) => {
+      const msg = data.reason === 'disconnect'
+        ? 'Your partner lost connection. Session ended.'
+        : 'Your partner left. Session ended.';
+      endSessionRef.current(msg);
+    });
 
-  const handleLeave = useCallback(() => {
-    if (socketRef.current && roomId) {
-      socketRef.current.emit('leave_room', { roomId });
-    }
-    disconnectSocket();
-    socketRef.current = null;
-    setView('join');
-    setMessages([]);
-    setRoomId('');
-    setRoomName('');
-    setIsOneToOne(false);
-    setPartnerLeft(false);
-    setIsTyping(false);
-  }, [roomId]);
+    socket.emit('join_pool', { username: user.username, color: user.color });
+  }, [user]);
 
-  const handleCancelSearch = () => {
-    if (socketRef.current) {
-      socketRef.current.emit('cancel_pool');
-      socketRef.current.off('pool_matched');
-    }
-    disconnectSocket();
-    socketRef.current = null;
-    setView('join');
-    setIsOneToOne(false);
-  };
+  const handleSendMessage = useCallback(async (content: string) => {
+    if (!socketRef.current || !sharedKeyRef.current || !roomId) return;
 
-  const handleSendMessage = (content: string) => {
-    if (!socketRef.current || !roomId) return;
-    socketRef.current.emit('send_message', {
+    const payload = await encryptMessage(sharedKeyRef.current, content);
+
+    // BUG 2 FIX: confirm emit fires
+    console.log('Sending encrypted message to room', roomId);
+    socketRef.current.emit('encrypted_message', {
       roomId,
-      content,
-      username: user.username,
+      ...payload,
+      sender: user.username,
       color: user.color,
     });
-  };
+
+    // Add own message locally — we don't receive our own emit
+    setMessages(prev => [...prev, {
+      id: crypto.randomUUID(),
+      sender: user.username,
+      content,
+      timestamp: new Date().toLocaleTimeString([], {
+        hour: '2-digit', minute: '2-digit'
+      }),
+      isOwn: true,
+      color: user.color,
+    }]);
+  }, [roomId, user]);
 
   const handleTyping = useCallback((typing: boolean) => {
     if (!socketRef.current || !roomId) return;
-
     socketRef.current.emit('user_typing', {
       roomId,
       username: user.username,
       isTyping: typing,
     });
-
-    if (typing) {
-      // Reset the stop-typing timer
-      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
-      typingTimerRef.current = setTimeout(() => {
-        socketRef.current?.emit('user_typing', {
-          roomId,
-          username: user.username,
-          isTyping: false,
-        });
-      }, 2000);
-    }
   }, [roomId, user.username]);
 
-  const randomizeUser = () => {
-    setUser({
-      username: generateRandomUsername(),
-      color: getRandomColor(),
-    });
-  };
+  const handleLeave = useCallback(() => {
+    if (socketRef.current && roomId) {
+      socketRef.current.emit('leave_session', { roomId });
+    }
+    disconnectSocket();
+    socketRef.current    = null;
+    sharedKeyRef.current = null;
+    keyPairRef.current   = null;
+    setView('join');
+    setMessages([]);
+    setRoomId('');
+  }, [roomId]);
+
+  const handleCancelSearch = useCallback(() => {
+    if (socketRef.current) {
+      socketRef.current.emit('cancel_pool');
+      socketRef.current.off('pool_matched');
+    }
+    disconnectSocket();
+    socketRef.current  = null;
+    keyPairRef.current = null;
+    setView('join');
+  }, []);
+
+  const handleNewSession = useCallback(() => {
+    disconnectSocket();
+    socketRef.current    = null;
+    sharedKeyRef.current = null;
+    keyPairRef.current   = null;
+    setMessages([]);
+    setRoomId('');
+    setView('join');
+  }, []);
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center p-0 md:p-4 overflow-hidden">
       <AnimatePresence mode="wait">
         {view === 'join' && (
-          <motion.div
-            key="join"
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
-            className="w-full max-w-md"
-          >
-            <JoinScreen
-              user={user}
-              onJoin={handleJoin}
-              onRandomize={randomizeUser}
+          <motion.div key="join"
+            initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }} className="w-full max-w-md">
+            <JoinScreen user={user} onJoinPool={handleJoinPool} />
+          </motion.div>
+        )}
+        {(view === 'searching' || view === 'handshake') && (
+          <motion.div key="searching"
+            initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 1.1 }} className="w-full max-w-md">
+            <SearchingScreen
+              onCancel={handleCancelSearch}
+              phase={view === 'handshake' ? 'handshake' : 'searching'}
             />
           </motion.div>
         )}
-
-        {view === 'searching' && (
-          <motion.div
-            key="searching"
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 1.1 }}
-            className="w-full max-w-md"
-          >
-            <SearchingScreen onCancel={handleCancelSearch} />
-          </motion.div>
-        )}
-
         {view === 'chat' && (
-          <motion.div
-            key="chat"
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
+          <motion.div key="chat"
+            initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 1.05 }}
-            className="w-full h-full md:h-[800px] max-w-5xl"
-          >
+            className="w-full h-full md:h-[800px] max-w-5xl">
             <ChatScreen
               user={user}
-              roomName={roomName}
               messages={messages}
               isTyping={isTyping}
-              onlineCount={onlineCount}
               onLeave={handleLeave}
               onSendMessage={handleSendMessage}
               onTyping={handleTyping}
-              partnerLeft={partnerLeft}
-              isOneToOne={isOneToOne}
+            />
+          </motion.div>
+        )}
+        {view === 'ended' && (
+          <motion.div key="ended"
+            initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }} className="w-full max-w-md">
+            <SessionEndedScreen
+              reason={sessionEndReason}
+              onNewSession={handleNewSession}
             />
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  );
+}
+
+// Inline component — simple, no file needed
+function SessionEndedScreen({
+  reason, onNewSession
+}: { reason: string; onNewSession: () => void }) {
+  return (
+    <div className="bg-secondary p-8 rounded-2xl shadow-2xl border border-accent/30 flex flex-col items-center text-center gap-6">
+      <div className="text-4xl">🔒</div>
+      <div>
+        <h2 className="text-xl font-bold text-text-main mb-2">Session Ended</h2>
+        <p className="text-text-dim text-sm">{reason}</p>
+        <p className="text-text-dim text-xs mt-2">All messages have been cleared from memory.</p>
+      </div>
+      <button
+        onClick={onNewSession}
+        className="bg-highlight hover:bg-highlight/90 text-white font-bold py-3 px-8 rounded-xl transition-all"
+      >
+        Start New Session
+      </button>
     </div>
   );
 }

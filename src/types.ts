@@ -13,4 +13,17 @@ export interface User {
   color: string;
 }
 
-export type AppState = 'join' | 'searching' | 'chat';
+// Session states:
+// join       → landing screen
+// searching  → waiting in pool queue
+// handshake  → matched, waiting for partner public key
+// chat       → encrypted session active
+// ended      → partner left, session over
+export type AppState = 'join' | 'searching' | 'handshake' | 'chat' | 'ended';
+
+export interface EncryptedPayload {
+  iv: string;
+  ciphertext: string;
+  sender: string;
+  color: string;
+}
