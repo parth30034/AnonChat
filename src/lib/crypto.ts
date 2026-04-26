@@ -1,6 +1,12 @@
 const ECDH_PARAMS = { name: 'ECDH', namedCurve: 'P-256' };
 const AES_PARAMS  = { name: 'AES-GCM', length: 256 };
 
+const seenIVs = new Set<string>();
+
+export function clearCryptoSession(): void {
+  seenIVs.clear();
+}
+
 export async function generateKeyPair(): Promise<CryptoKeyPair> {
   return window.crypto.subtle.generateKey(
     ECDH_PARAMS,
@@ -58,6 +64,10 @@ export async function decryptMessage(
   iv: string,
   ciphertext: string
 ): Promise<string> {
+  if (seenIVs.has(iv)) {
+    throw new Error('IV reuse detected — message rejected');
+  }
+  seenIVs.add(iv);
   const decrypted = await window.crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: base64ToBuf(iv) },
     sharedKey,

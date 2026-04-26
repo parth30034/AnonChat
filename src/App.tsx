@@ -18,8 +18,17 @@ import {
   deriveSharedKey,
   encryptMessage,
   decryptMessage,
+  clearCryptoSession,
 } from './lib/crypto';
 import type { Socket } from 'socket.io-client';
+
+function cleanupSessionListeners(socket: Socket) {
+  socket.off('public_key_receive');
+  socket.off('encrypted_message');
+  socket.off('partner_left');
+  socket.off('user_typing');
+  socket.off('pool_matched');
+}
 
 export default function App() {
   const [view, setView]               = useState<AppState>('join');
@@ -35,13 +44,19 @@ export default function App() {
   const socketRef    = useRef<Socket | null>(null);
   const keyPairRef   = useRef<CryptoKeyPair | null>(null);
   const sharedKeyRef = useRef<CryptoKey | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
 
   const endSessionRef = useRef<(reason: string) => void>(() => {});
 
   useEffect(() => {
     endSessionRef.current = (reason: string) => {
-      sharedKeyRef.current = null;
-      keyPairRef.current   = null;
+      if (socketRef.current) {
+        cleanupSessionListeners(socketRef.current);
+      }
+      clearCryptoSession();
+      sharedKeyRef.current  = null;
+      keyPairRef.current    = null;
+      sessionIdRef.current  = null;
       setSessionEndReason(reason);
       setView('ended');
     };
@@ -64,13 +79,27 @@ export default function App() {
     const socket = connectSocket();
     socketRef.current = socket;
 
+    const sessionId = crypto.randomUUID();
+    sessionIdRef.current = sessionId;
+
+    function isSessionStale() {
+      return sessionIdRef.current !== sessionId;
+    }
+
     keyPairRef.current = await generateKeyPair();
+
+    socket.on('connect_error', (err) => {
+      console.error('Connection error:', err.message);
+      endSessionRef.current('Connection failed. Please try again.');
+    });
 
     socket.once('pool_matched', async (payload: {
       roomId: string;
       partnerUsername: string;
       partnerColor: string;
     }) => {
+      if (isSessionStale()) return;
+
       const currentRoomId = payload.roomId;
       setRoomId(currentRoomId);
       setMessages([systemMsg('Matched! Establishing secure connection...')]);
@@ -78,22 +107,46 @@ export default function App() {
 
       await new Promise(resolve => setTimeout(resolve, 800));
 
+      if (isSessionStale()) return;
+
       const pubKey = await exportPublicKey(keyPairRef.current!.publicKey);
+
+      if (isSessionStale()) return;
+
       socket.emit('public_key_announce', {
         roomId: currentRoomId,
         publicKey: pubKey,
       });
 
+      const handshakeTimeout = setTimeout(() => {
+        if (isSessionStale()) return;
+        socket.off('public_key_receive');
+        endSessionRef.current(
+          'Secure handshake timed out. Partner may have disconnected.'
+        );
+      }, 10000);
+
       socket.once('public_key_receive', async (data: { publicKey: JsonWebKey }) => {
+        clearTimeout(handshakeTimeout);
+
+        if (isSessionStale()) return;
+
         const theirKey = await importPublicKey(data.publicKey);
+
+        if (isSessionStale()) return;
+
         sharedKeyRef.current = await deriveSharedKey(
           keyPairRef.current!.privateKey,
           theirKey
         );
+
+        if (isSessionStale()) return;
+
         setMessages([systemMsg('🔒 Secure session established. Messages are end-to-end encrypted.')]);
         setView('chat');
 
         socket.on('encrypted_message', async (p: EncryptedPayload) => {
+          if (isSessionStale()) return;
           if (!sharedKeyRef.current) return;
           try {
             const plaintext = await decryptMessage(
@@ -134,6 +187,7 @@ export default function App() {
 
   const handleSendMessage = useCallback(async (content: string) => {
     if (!socketRef.current || !sharedKeyRef.current || !roomId) return;
+    if (sessionIdRef.current === null) return;
 
     const payload = await encryptMessage(sharedKeyRef.current, content);
 
@@ -170,10 +224,15 @@ export default function App() {
     if (socketRef.current && roomId) {
       socketRef.current.emit('leave_session', { roomId });
     }
+    if (socketRef.current) {
+      cleanupSessionListeners(socketRef.current);
+    }
+    clearCryptoSession();
     disconnectSocket();
     socketRef.current    = null;
     sharedKeyRef.current = null;
     keyPairRef.current   = null;
+    sessionIdRef.current = null;
     setView('join');
     setMessages([]);
     setRoomId('');
@@ -182,19 +241,23 @@ export default function App() {
   const handleCancelSearch = useCallback(() => {
     if (socketRef.current) {
       socketRef.current.emit('cancel_pool');
-      socketRef.current.off('pool_matched');
+      cleanupSessionListeners(socketRef.current);
     }
+    clearCryptoSession();
     disconnectSocket();
-    socketRef.current  = null;
-    keyPairRef.current = null;
+    socketRef.current    = null;
+    keyPairRef.current   = null;
+    sessionIdRef.current = null;
     setView('join');
   }, []);
 
   const handleNewSession = useCallback(() => {
+    clearCryptoSession();
     disconnectSocket();
     socketRef.current    = null;
     sharedKeyRef.current = null;
     keyPairRef.current   = null;
+    sessionIdRef.current = null;
     setMessages([]);
     setRoomId('');
     setView('join');
