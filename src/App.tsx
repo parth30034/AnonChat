@@ -36,12 +36,8 @@ export default function App() {
   const keyPairRef   = useRef<CryptoKeyPair | null>(null);
   const sharedKeyRef = useRef<CryptoKey | null>(null);
 
-  // BUG 3 FIX: endSession lives in a ref so partner_left always calls
-  // the current implementation, never a stale closure capture.
   const endSessionRef = useRef<(reason: string) => void>(() => {});
 
-  // Keep endSessionRef.current pointing at the latest closure (no deps →
-  // runs after every render, always fresh).
   useEffect(() => {
     endSessionRef.current = (reason: string) => {
       sharedKeyRef.current = null;
@@ -63,13 +59,11 @@ export default function App() {
     };
   }
 
-  // BUG 3 FIX: endSession removed from deps — handleJoinPool only depends on user.
   const handleJoinPool = useCallback(async () => {
-    setView('searching');   // immediately hide the button — prevents double-invocation
+    setView('searching');
     const socket = connectSocket();
     socketRef.current = socket;
 
-    // Generate key pair immediately — ready before match happens
     keyPairRef.current = await generateKeyPair();
 
     socket.once('pool_matched', async (payload: {
@@ -82,18 +76,14 @@ export default function App() {
       setMessages([systemMsg('Matched! Establishing secure connection...')]);
       setView('handshake');
 
-      // BUG 1 FIX: give React time to render the handshake screen before
-      // the key exchange completes and immediately flips to 'chat'.
       await new Promise(resolve => setTimeout(resolve, 800));
 
-      // Send our public key to the server for relay to partner
       const pubKey = await exportPublicKey(keyPairRef.current!.publicKey);
       socket.emit('public_key_announce', {
         roomId: currentRoomId,
         publicKey: pubKey,
       });
 
-      // Wait for partner's public key
       socket.once('public_key_receive', async (data: { publicKey: JsonWebKey }) => {
         const theirKey = await importPublicKey(data.publicKey);
         sharedKeyRef.current = await deriveSharedKey(
@@ -103,8 +93,6 @@ export default function App() {
         setMessages([systemMsg('🔒 Secure session established. Messages are end-to-end encrypted.')]);
         setView('chat');
 
-        // BUG 2 FIX: register encrypted_message listener here — exactly once
-        // per session, after sharedKeyRef is populated. No view dependency.
         socket.on('encrypted_message', async (p: EncryptedPayload) => {
           if (!sharedKeyRef.current) return;
           try {
@@ -128,16 +116,12 @@ export default function App() {
           }
         });
 
-        // BUG 3 FIX: register user_typing listener here — same session scope,
-        // no stale closure risk (user is stable for the session lifetime).
         socket.on('user_typing', (p: { username: string; isTyping: boolean }) => {
           if (p.username !== user.username) setIsTyping(p.isTyping);
         });
       });
     });
 
-    // BUG 3 FIX: call endSessionRef.current so we always invoke the latest
-    // implementation regardless of when this listener fires.
     socket.on('partner_left', (data: { reason: string }) => {
       const msg = data.reason === 'disconnect'
         ? 'Your partner lost connection. Session ended.'
@@ -153,7 +137,6 @@ export default function App() {
 
     const payload = await encryptMessage(sharedKeyRef.current, content);
 
-    // BUG 2 FIX: confirm emit fires
     console.log('Sending encrypted message to room', roomId);
     socketRef.current.emit('encrypted_message', {
       roomId,
@@ -162,7 +145,6 @@ export default function App() {
       color: user.color,
     });
 
-    // Add own message locally — we don't receive our own emit
     setMessages(prev => [...prev, {
       id: crypto.randomUUID(),
       sender: user.username,
@@ -268,7 +250,6 @@ export default function App() {
   );
 }
 
-// Inline component — simple, no file needed
 function SessionEndedScreen({
   reason, onNewSession
 }: { reason: string; onNewSession: () => void }) {
